@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -107,6 +108,7 @@ import com.example.echorollv2.data.local.entity.SubjectEntity
 import com.example.echorollv2.data.preferences.UserPreferences
 import com.example.echorollv2.data.repository.EchoRepository
 import com.example.echorollv2.services.DailyCheckWorker
+import com.example.echorollv2.services.NotificationScheduler
 import com.example.echorollv2.services.NotificationHelper
 import com.example.echorollv2.ui.screens.setup.AddSubjectScreen
 import com.example.echorollv2.ui.screens.setup.DaySchedule
@@ -143,12 +145,39 @@ fun getSubjectColor(subjectCode: String): Color {
     return SubjectColors[index]
 }
 
+/**
+ * Returns the minimum number of future classes that must be attended so that
+ * one subsequent missed class still keeps attendance at/above the target.
+ *
+ * A 100% target can never safely absorb a missed class, so null is returned.
+ */
+fun classesToSafelyMissOne(
+    attended: Int,
+    total: Int,
+    requiredPercentage: Int
+): Int? {
+    if (requiredPercentage >= 100) return null
+    if (requiredPercentage <= 0) return 0
+
+    val denominator = 100 - requiredPercentage
+    val numerator = requiredPercentage * (total + 1) - (attended * 100)
+
+    if (numerator <= 0) return 0
+
+    return (numerator + denominator - 1) / denominator
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
         NotificationHelper.createNotificationChannel(this)
+
+        // Register the OS-owned daily scheduling trigger. After this setup,
+        // daily notification scheduling does not depend on reopening the app.
+        NotificationScheduler.scheduleNextDailyCheck(this)
+
         val initialDelay = com.example.echorollv2.utils.DateTimeUtils.getDelayUntilNextSixAM()
         val workRequest = PeriodicWorkRequestBuilder<DailyCheckWorker>(1, TimeUnit.DAYS)
             .setInitialDelay(initialDelay, TimeUnit.MILLISECONDS)
@@ -851,7 +880,12 @@ fun TodayClassCard(
                 statusText = "Can miss $canMiss class${if (canMiss > 1) "es" else ""}"
                 statusColor = Color(0xFF8BC34A)
             } else {
-                statusText = "Can't miss any class"
+                val moreToAttend = classesToSafelyMissOne(attended, total, req)
+                statusText = if (moreToAttend != null) {
+                    "Attend $moreToAttend more class${if (moreToAttend == 1) "" else "es"} to safely miss 1 class"
+                } else {
+                    "Cannot safely miss 1 class"
+                }
                 statusColor = Color(0xFFF39C12)
             }
         } else {
@@ -1487,7 +1521,12 @@ fun SubjectCard(
                 statusText = "Can miss $canMiss class${if (canMiss > 1) "es" else ""}"
                 statusColor = Color(0xFF8BC34A) // Greenish
             } else {
-                statusText = "Can't miss any class"
+                val moreToAttend = classesToSafelyMissOne(attended, total, req)
+                statusText = if (moreToAttend != null) {
+                    "Attend $moreToAttend more class${if (moreToAttend == 1) "" else "es"} to safely miss 1 class"
+                } else {
+                    "Cannot safely miss 1 class"
+                }
                 statusColor = Color(0xFFF39C12) // Orange
             }
         } else {
@@ -2031,6 +2070,9 @@ fun AttendanceCalendarGrid(
                         if (date != null) {
                             val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(date)
                             val dayRecords = records.filter { it.date == dateStr }
+                            val attendanceCount = dayRecords.count {
+                                it.status == "Present" || it.status == "Absent"
+                            }
                             val dayOfMonth = SimpleDateFormat("d", Locale.getDefault()).format(date)
                             val dayNameFull = SimpleDateFormat("EEEE", Locale.getDefault()).format(date)
                             
@@ -2076,11 +2118,17 @@ fun AttendanceCalendarGrid(
                             
                             val contentAlpha = if (isFuture || (!isClassDay && !isHoliday && !isExamDay && dayRecords.isEmpty())) 0.5f else 1.0f
 
-                            Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                            Box(
+                                modifier = Modifier.size(36.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
                                 Box(
                                     modifier = Modifier
                                         .size(36.dp)
-                                        .background(bgColor.copy(alpha = contentAlpha), RoundedCornerShape(4.dp))
+                                        .background(
+                                            bgColor.copy(alpha = contentAlpha),
+                                            RoundedCornerShape(4.dp)
+                                        )
                                         .clickable {
                                             if (isFuture) {
                                                 onMarkingRestricted("Attendance cannot be marked for future dates!")
@@ -2096,7 +2144,29 @@ fun AttendanceCalendarGrid(
                                         },
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text(dayOfMonth, color = (if (isHoliday) Color.Black else colors.textPrimary).copy(alpha = contentAlpha), fontSize = 12.sp)
+                                    Text(
+                                        dayOfMonth,
+                                        color = (if (isHoliday) Color.Black else colors.textPrimary).copy(alpha = contentAlpha),
+                                        fontSize = 12.sp
+                                    )
+                                }
+
+                                if (attendanceCount > 0) {
+                                    Surface(
+                                        color = colors.surfaceVariant.copy(alpha = contentAlpha),
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .offset(x = 2.dp, y = (-2).dp)
+                                    ) {
+                                        Text(
+                                            "$attendanceCount",
+                                            color = colors.textPrimary.copy(alpha = contentAlpha),
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                                        )
+                                    }
                                 }
                             }
                         } else {
